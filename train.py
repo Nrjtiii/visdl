@@ -119,5 +119,3 @@ df = pd.DataFrame({
 csv_filename = "test_predictions.csv"
 df.to_csv(path_or_buf= "/log", name=csv_filename, index=False)
 print(f"Predictions saved to {csv_filename}")
-
-#tes
