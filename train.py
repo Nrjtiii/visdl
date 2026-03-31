@@ -2,6 +2,8 @@ import torch
 import numpy as np
 import evaluate
 import pandas as pd
+import os
+import matplotlib.pyplot as plt 
 from transformers import (
     AutoImageProcessor, 
     AutoModelForImageClassification, 
@@ -9,39 +11,55 @@ from transformers import (
     Trainer,
     DefaultDataCollator
 )
-from datasets import load_dataset 
+from torchvision.transforms import v2
+from datasets import load_dataset, Image
 
-# 1. Load your local dataset
-# Note: Ensure "cv_hw1_data/data/train" is a DatasetDict containing "train" and "test"
+torch.cuda.empty_cache()
+
 dataset = load_dataset("imagefolder", data_dir="dataset/data", drop_labels=False)
-
-
-#dataset = load_dataset("nsarker/flower-detection")
-
-print(f"Splits found: {dataset.keys()}")
-print(f"{dataset}")
-# Extract labels
 labels = dataset["train"].features["label"].names
 label2id = {label: i for i, label in enumerate(labels)}
 id2label = {i: label for i, label in enumerate(labels)}
 
 
-
-model_checkpoint = "microsoft/resnet-152"
-
-# 2. Load Processor & Define Preprocessing
+model_checkpoint = "timm/resnetrs200.tf_in1k"
 image_processor = AutoImageProcessor.from_pretrained(model_checkpoint)
 
-def transform(example_batch):
-    # Take a list of PIL images and turn them into pixel values
-    inputs = image_processor([x.convert("RGB") for x in example_batch["image"]], return_tensors="pt")
+
+train_transforms = v2.Compose([
+    v2.RandomRotation(degrees=180),       
+    v2.RandomHorizontalFlip(p=0.5),      
+    v2.ColorJitter(brightness=0.3, saturation=0.2, hue=0.1),
+    v2.GaussianBlur(kernel_size=(1,3), sigma=(0.1,5.0))     
+])
+
+
+def preprocess_train(example_batch):
+    images = [train_transforms(x.convert("RGB")) for x in example_batch["image"]]
+    inputs = image_processor(images, return_tensors="pt")
     inputs["label"] = example_batch["label"]
     return inputs
 
-# Apply transforms on-the-fly (saves RAM/Disk space)
-dataset.set_transform(transform)
 
-# 3. Load Model
+def preprocess_val(example_batch):
+    images = [x.convert("RGB") for x in example_batch["image"]]
+    
+    inputs = image_processor(images, return_tensors="pt")
+    inputs["pixel_values"]
+
+    inputs["label"] = example_batch["label"]
+    return inputs
+
+def compute_metrics(eval_pred):
+    logits, labels = eval_pred
+    predictions = np.argmax(logits, axis=-1)
+    return metric.compute(predictions=predictions, references=labels)
+
+
+dataset["train"].set_transform(preprocess_train)
+dataset["validation"].set_transform(preprocess_val)
+dataset["test"].set_transform(preprocess_val)
+
 
 model = AutoModelForImageClassification.from_pretrained(
     model_checkpoint,
@@ -51,71 +69,110 @@ model = AutoModelForImageClassification.from_pretrained(
     ignore_mismatched_sizes=True 
 )
 
-# 4. Define Accuracy Metric
+
 metric = evaluate.load("accuracy")
 
-def compute_metrics(eval_pred):
-    logits, labels = eval_pred
-    predictions = np.argmax(logits, axis=-1)
-    return metric.compute(predictions=predictions, references=labels)
-
-# 5. Training Config
 training_args = TrainingArguments(
     output_dir="./log",
     remove_unused_columns=False, 
     eval_strategy="epoch",
     save_strategy="epoch",
-    learning_rate=5e-5,
-    per_device_train_batch_size=16,
-    gradient_accumulation_steps=4,
+    learning_rate=7e-4,
+    per_device_train_batch_size=48,
+    gradient_accumulation_steps=1,
+    lr_scheduler_type="cosine",
+    label_smoothing_factor=0.1,
+    dataloader_num_workers=8,
     num_train_epochs=10,
-    warmup_ratio=0.1,
-    logging_steps=10,
+    warmup_ratio=0.05,
+    logging_steps=50,
     load_best_model_at_end=True,
     metric_for_best_model="accuracy",
-    fp16=torch.cuda.is_available(), # Leverage your GPU
+    fp16=torch.cuda.is_available(), 
 )
 
-# 6. Initialize Trainer
 trainer = Trainer(
     model=model,
     args=training_args,
     train_dataset=dataset["train"],
     eval_dataset=dataset["validation"], 
-    processing_class=image_processor, # Renamed from 'tokenizer' for clarity
-    compute_metrics=compute_metrics,  # Added this!
+    processing_class=image_processor, 
+    compute_metrics=compute_metrics,  
     data_collator=DefaultDataCollator(),
 )
 
-# 7. GO!
 trainer.train()
 
-# --- 6. Final Test Evaluation ---
-print("\n--- Evaluating on Test Set ---")
-test_metrics = trainer.evaluate(dataset["test"])
-print(f"Final Test Accuracy: {test_metrics['eval_accuracy'] * 100:.2f}%")
 
-# --- 7. Generate Predictions for CSV ---
-print("Generating predictions for CSV...")
-# This gives us the raw logits for the test set
+
+
+#==========================================
+# VISUALIZATION 
+# =========================================
+print("\nGenerating Visualizations...")
+
+
+def plot_training_curves(log_history):
+    train_loss, val_loss, val_acc, epochs_train, epochs_val = [], [], [], [], []
+    
+    for log in log_history:
+        if "loss" in log and "epoch" in log:
+            train_loss.append(log["loss"])
+            epochs_train.append(log["epoch"])
+        elif "eval_loss" in log and "epoch" in log:
+            val_loss.append(log["eval_loss"])
+            val_acc.append(log["eval_accuracy"])
+            epochs_val.append(log["epoch"])
+
+    plt.figure(figsize=(12, 5))
+    
+    # Loss Plot
+    plt.subplot(1, 2, 1)
+    plt.plot(epochs_train, train_loss, label="Train Loss", color="blue")
+    plt.plot(epochs_val, val_loss, label="Val Loss", color="red", marker="o")
+    plt.xlabel("Epoch")
+    plt.ylabel("Loss")
+    plt.title("Training and Validation Loss")
+    plt.legend()
+    plt.grid(True, linestyle='--', alpha=0.6)
+
+    # Accuracy Plot
+    plt.subplot(1, 2, 2)
+    plt.plot(epochs_val, val_acc, label="Val Accuracy", color="green", marker="o")
+    plt.xlabel("Epoch")
+    plt.ylabel("Accuracy")
+    plt.title("Validation Accuracy")
+    plt.legend()
+    plt.grid(True, linestyle='--', alpha=0.6)
+
+    plt.tight_layout()
+    plt.savefig("training_curves.png")
+    plt.close()
+    print("- Saved training_curves.png")
+
+plot_training_curves(trainer.state.log_history)
+
+print("\nGenerating predictions for benchmarking...")
+
+
 output = trainer.predict(dataset["test"])
 preds = np.argmax(output.predictions, axis=-1)
 
-# Map predicted IDs back to class names (0-100)
+
+dataset["test"].reset_format() 
+test_metadata = dataset["test"].cast_column("image", Image(decode=False))
+
+image_names = []
+for i in range(len(test_metadata)):
+    file_path = test_metadata[i]["image"]["path"]
+    image_names.append(os.path.basename(file_path))
+
 predicted_labels = [id2label[p] for p in preds]
 
-# Get original ground truth labels (if you want to compare in the CSV)
-true_labels = [id2label[l] for l in output.label_ids]
-
-# Create the DataFrame
 df = pd.DataFrame({
-    "image_index": range(len(preds)),
-    "true_label": true_labels,
-    "predicted_label": predicted_labels,
-    "is_correct": np.array(true_labels) == np.array(predicted_labels)
+    "image_name": image_names,
+    "pred_label": predicted_labels
 })
 
-# Save to CSV
-csv_filename = "test_predictions.csv"
-df.to_csv(path_or_buf= "/log", name=csv_filename, index=False)
-print(f"Predictions saved to {csv_filename}")
+df.to_csv("submission.csv", index=False)
+print(f"Success! Saved {len(df)} rows to submission.csv")
