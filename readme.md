@@ -18,14 +18,14 @@ conda activate image-class-env
 ## Usage
 
 ### Training
-'''
+```
 python train.py
-'''
+```
 
 ### Inference
-'''
+```
 python infer.py
-'''
+```
 
 
 ## Dataset Structure
@@ -46,6 +46,7 @@ dataset/data/
 └── test/
     ├── img3.jpg
     └── ...
+```
 
 ## Performance Snapshot
     
