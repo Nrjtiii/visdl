@@ -50,4 +50,4 @@ dataset/data/
 
 ## Performance Snapshot
     
-![Performance Snapshot] (/image.png)
+![Performance Snapshot](/image.png)
