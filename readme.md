@@ -10,10 +10,10 @@ This project implements a PyTorch and Hugging Face transformers pipeline to fine
 ## Environment Setup
 
 This project uses Conda for dependency management
-'''
+```
 conda env create -f environment.yml
 conda activate image-class-env
-'''
+```
 
 ## Usage
 
